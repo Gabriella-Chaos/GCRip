@@ -5,17 +5,27 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+from importlib import import_module
+import importlib.util
 import time
 
-from mpls import MPLSTools
+import vapoursynth as vs
+from .mpls import MPLSTools
 
 
-def Ripper():
+os.environ["OMP_NUM_THREADS"] = "36" # export OMP_NUM_THREADS=1
+os.environ["OPENBLAS_NUM_THREADS"] = "36" # export OPENBLAS_NUM_THREADS=1 
+os.environ["MKL_NUM_THREADS"] = "36" # export MKL_NUM_THREADS=1
+os.environ["VECLIB_MAXIMUM_THREADS"] = "36" # export VECLIB_MAXIMUM_THREADS=1
+os.environ["NUMEXPR_NUM_THREADS"] = "36" # export NUMEXPR_NUM_THREADS=1
+
+
+class Ripper():
 
     def __init__(self, args):
-        args = self.args
+        self.args = args
 
-    def stream_info(m2ts_path):
+    def stream_info(self, m2ts_path):
         command = [
             "ffprobe",
             "-i", m2ts_path,
@@ -29,31 +39,40 @@ def Ripper():
 
     def process_video(self, fpath, work_dir, streams):
         script_path = self.args.script_path
-        outpath = os.path.join(work_dir, "out.hevc")
+        out_path = os.path.join(work_dir, "out.hevc")
 
         script_dir, fname = os.path.split(script_path)
-        os.chdir(script_path)
+        # wdir = os.getcwd()
+        # os.chdir(script_dir)
 
-        module = os.path.splitext(fname)[0]
+        module_name = os.path.splitext(fname)[0]
 
-        script = import_module(module)
+        spec = importlib.util.spec_from_file_location(module_name, script_path)
+        script = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(script)
 
-        clip = script.main(fpath)
+        # script = import_module(module)
+
+        core = vs.core
+        core.num_threads = 1
+
+        clip = script.main(fpath, core)
+        # os.chdir(wdir)
 
         x265 = shutil.which('x265')
         x265_cmd = [x265, '--frames', f'{len(clip)}',
-                     '--y4m', '--asm', 'avx2',
+                     '--y4m', '--asm', 'avx2', '--pools', '16', '--colormatrix', 'bt709',
                      '--input-depth', f'{clip.format.bits_per_sample}',
                      '--output-depth', f'{clip.format.bits_per_sample}',
                      '--input-res', f'{clip.width}x{clip.height}',
                      '--fps', f'{clip.fps_num}/{clip.fps_den}',
                      '--no-open-gop', '--preset', 'placebo','--deblock', '-1:-1', 
                      '--b-intra', '--no-rect', '--no-amp', '--weightb', '--ref', '7',
-                     '--rd', '6', '--no-sao', '--crf', '13.3', '--aq-mode', '1', 
+                     '--rd', '6', '--no-sao', '--crf', '15', '--aq-mode', '1', 
                      '--aq-strength', '0.8', '--psy-rd', '3.3', '--psy-rdoq', '1.3',
                      '--pbratio', '1.2', '--cbqpoffs', '-1', '--crqpoffs', '-1', 
                      '--no-strong-intra-smoothing', '--rc-lookahead', '66',
-                     '--output', outpath,
+                     '--output', out_path,
                      '-'] 
 
                     # '--ctu', '32', '--qg-size', '8', '--me', '3', '--subme', '4', '--merange', '38',
@@ -63,8 +82,11 @@ def Ripper():
         clip.output(process.stdin, y4m=True)
         process.communicate()
 
+        return out_path
+
     def forge_mkv(self, item, m2ts_path, vpath, out_path):
-        command = ["mkvmerge", "-o", output_path, vpath, "--no-video", m2ts_path]
+        mkvmerge = shutil.which('mkvmerge')
+        command = [mkvmerge, "-o", out_path, vpath, "--no-video", m2ts_path]
         if item in self.chapter_files:
             command.extend(["--chapters", self.chapter_files[item]])
 
@@ -75,6 +97,9 @@ def Ripper():
         work_dir = work_dir / (item + "_build")
         work_dir.mkdir(parents=True, exist_ok=True)
 
+        m2ts_path = os.path.join(self.args.m2ts_dir, item + ".m2ts")
+
+        streams = self.stream_info(m2ts_path)
         vpath = self.process_video(m2ts_path, work_dir, streams)
         self.forge_mkv(item, m2ts_path, vpath, out_path)
 
@@ -90,15 +115,18 @@ def Ripper():
         fnames = [n[:-5] for n in os.listdir(args.m2ts_dir) if n[-5:] == ".m2ts"]
 
         for i, item in enumerate(fnames):
-            outpath = os.path.join(args.out_dir, f"clip_{i}.mkv")
-            rip(item, args, work_dir, out_path)
+            out_path = os.path.join(args.out_dir, f"clip_{item}.mkv")
+            try:
+                self.rip(item, work_dir, out_path)
+            except vs.Error as e:
+                print(e)
 
 
 def main():
     parser = argparse.ArgumentParser(description='Automated BDRip Workflow')
-    parser.add_argument(dest='script_path', type=str, help='Absolute or relative path to the encoding script', required=True)
-    parser.add_argument(dest='m2ts_dir', type=str, help='Absolute or relative path to the m2ts directory', required=True)
-    parser.add_argument(dest='mpls_dir', type=str, help='Absolute or relative path to the mpls directory', required=True)
+    parser.add_argument('--script', '-s', dest='script_path', type=str, help='Absolute or relative path to the encoding script', required=True)
+    parser.add_argument('--m2ts', '-t', dest='m2ts_dir', type=str, help='Absolute or relative path to the m2ts directory', required=True)
+    parser.add_argument('--mpls', '-p', dest='mpls_dir', type=str, help='Absolute or relative path to the mpls directory', required=True)
     parser.add_argument('--build', '-b', dest='build_dir', type=str, default='./', help='Absolute or relative path to the build directory')
     parser.add_argument('--output', '-o', dest='out_dir', type=str, default='./', help='Absolute or relative path to the output directory')
 

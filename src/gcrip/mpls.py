@@ -1,7 +1,7 @@
 from datetime import timedelta
 import json
 import os
-import MPLS
+from . import MPLS
 
 
 class MPLSTools():
